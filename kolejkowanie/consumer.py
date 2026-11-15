@@ -1,52 +1,38 @@
 #Wytworzenie instancji consumera zadań
 
+import pika
 import time
 import os
-import sqlite3
+import json
 
-db_name = 'task.db'
+rabbit_host = "localhost"
+rabbit_port = 8081
+queue_name = "task_queue"
 
-def get_and_lock_task():
-    con = sqlite3.connect(db_name, timeout=30)
-    con.isolation_level = None
-    cursor = con.cursor()
-    task_to_process = None
-    try:
-        cursor.execute("BEGIN IMMEDIATE") #inni nie mogą jednocześnei
-        cursor.execute("SELECT id, name FROM tasks WHERE status = 'pending' LIMIT 1")
-        row = cursor.fetchone()
-        if row:
-            task_id, task_name = row
-            cursor.execute("UPDATE tasks SET status = 'in_progress' WHERE id = ?",(task_id,))
-            task_to_process = (task_id, task_name)
-        cursor.execute("COMMIT")
-    except sqlite3.Error as error:
-        cursor.execute("ROLLBACK")
-        print(f"[{os.getpid()}] Błąd bazy danych podczas pobierania zadania {error}")
-    finally:
-        con.close()
-    return task_to_process
-
-def task_done(task_id):
-   con = sqlite3.connect(db_name, timeout=30)
-   try:
-       with con:
-           con.execute("UPDATE tasks SET status = 'done' WHERE id = ?",(task_id,))
-   finally:
-       con.close()
+def callback(ch, method, properties, body):
+    task = json.loads(body.decode("utf-8"))
+    task_name = task["name"]
+    print(f"[{os.getpid()}] Podejmuję {task_name}. Status 'in_progress'")
+    time.sleep(30)
+    ch.basic_ack(delivery_tag=method.delivery_tag)
+    print(f"[{os.getpid()}] Zakończono {task_name}. Status 'done'")
 
 def run_consumer():
-    print(f"Consumer o PID: {os.getpid()} uruchomiony. Czeka na zadania")
-    while True:
-        task = get_and_lock_task()
-        if task:
-            task_id, task_name = task
-            print(f"[{os.getpid()}] Podejmuję {task_name}. Status 'in_progress'")
-            time.sleep(30)
-            task_done(task_id)
-            print(f"[{os.getpid()}] Zakończono {task_name}. Status 'done'")
-        else:
-            time.sleep(5)
+    connection = pika.BlockingConnection(
+        pika.ConnectionParameters(host=rabbit_host, port=rabbit_port)
+    )
+    channel = connection.channel()
+    channel.queue_declare(queue=queue_name, durable=True)
+    channel.basic_qos(prefetch_count=1) #jeden na raz
+    channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
+    print(f"Consumer {os.getpid()} uruchomiony. Nasłuchuje kolejki {queue_name}")
+    try:
+        channel.start_consuming()
+    except KeyboardInterrupt:
+        print(f"[{os.getpid()}] Zatrzymanie konsumenta")
+        channel.stop_consuming()
+    finally:
+        connection.close()
 
 if __name__ == "__main__":
     run_consumer()
